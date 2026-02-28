@@ -246,8 +246,19 @@ def process_pdf(uploaded_file, embedding_model):
         tmp.write(uploaded_file.getbuffer())
         tmp_path = tmp.name
 
-    docs = PyPDFLoader(file_path=tmp_path).load()
+    try:
+        docs = PyPDFLoader(file_path=tmp_path).load()
+    except Exception as e:
+        Path(tmp_path).unlink(missing_ok=True)
+        progress.empty()
+        raise ValueError(f"Invalid or corrupted PDF file: {uploaded_file.name}") from e
+
     Path(tmp_path).unlink(missing_ok=True)
+
+    if not docs:
+        progress.empty()
+        raise ValueError(f"Could not extract any pages from: {uploaded_file.name}")
+
     progress.progress(20, text=f"Loaded {len(docs)} pages. Chunking...")
 
     splitter = RecursiveCharacterTextSplitter(
@@ -392,14 +403,19 @@ if not st.session_state.vector_db:
 
         if uploaded_file:
             if st.button("Process & Index", use_container_width=True, type="primary"):
-                embedding_model = get_embedding_model()
-                vector_db, pages, chunks = process_pdf(uploaded_file, embedding_model)
-                st.session_state.vector_db = vector_db
-                st.session_state.pdf_name = uploaded_file.name
-                st.session_state.page_count = pages
-                st.session_state.chunk_count = chunks
-                st.session_state.messages = []
-                st.rerun()
+                try:
+                    embedding_model = get_embedding_model()
+                    vector_db, pages, chunks = process_pdf(uploaded_file, embedding_model)
+                    st.session_state.vector_db = vector_db
+                    st.session_state.pdf_name = uploaded_file.name
+                    st.session_state.page_count = pages
+                    st.session_state.chunk_count = chunks
+                    st.session_state.messages = []
+                    st.rerun()
+                except ValueError as e:
+                    st.error(str(e))
+                except Exception as e:
+                    st.error(f"Failed to process PDF: {e}")
         else:
             st.markdown(
                 '<p style="color: rgba(255,255,255,0.35); font-size: 0.82rem; text-align: center;">'
@@ -479,12 +495,17 @@ else:
         )
         if new_file and new_file.name != st.session_state.pdf_name:
             if st.button("Process New PDF", type="primary", use_container_width=True):
-                embedding_model = get_embedding_model()
-                vector_db, pages, chunks = process_pdf(new_file, embedding_model)
-                st.session_state.vector_db = vector_db
-                st.session_state.pdf_name = new_file.name
-                st.session_state.page_count = pages
-                st.session_state.chunk_count = chunks
-                st.session_state.messages = []
-                st.session_state.scroll_to = None
-                st.rerun()
+                try:
+                    embedding_model = get_embedding_model()
+                    vector_db, pages, chunks = process_pdf(new_file, embedding_model)
+                    st.session_state.vector_db = vector_db
+                    st.session_state.pdf_name = new_file.name
+                    st.session_state.page_count = pages
+                    st.session_state.chunk_count = chunks
+                    st.session_state.messages = []
+                    st.session_state.scroll_to = None
+                    st.rerun()
+                except ValueError as e:
+                    st.error(str(e))
+                except Exception as e:
+                    st.error(f"Failed to process PDF: {e}")
