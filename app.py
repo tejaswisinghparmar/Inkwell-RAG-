@@ -169,6 +169,14 @@ st.markdown("""
     /* ── Caption ─────────────────────────────────────────────────── */
     .stCaption { color: rgba(255,255,255,0.35) !important; }
 
+    /* ── Compact mic widget ───────────────────────────────────────── */
+    [data-testid="stAudioInput"] {
+        min-height: 0 !important;
+    }
+    [data-testid="stAudioInput"] > div {
+        padding: 0 !important;
+    }
+
     /* ── Hide Streamlit chrome ───────────────────────────────────── */
     #MainMenu { visibility: hidden; }
     footer { visibility: hidden; }
@@ -310,11 +318,18 @@ def text_to_speech(text: str):
 # ── Speech-to-Text ──────────────────────────────────────────────────
 def transcribe_audio(audio_bytes: bytes) -> str:
     """Transcribe audio bytes using HuggingFace Whisper model."""
-    client = InferenceClient(token=HF_TOKEN)
-    result = client.automatic_speech_recognition(
-        audio_bytes, model=STT_MODEL
-    )
-    return result.text if hasattr(result, "text") else str(result)
+    # Save to a temp .wav file so HuggingFace gets the correct content type
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+        tmp.write(audio_bytes)
+        tmp_path = tmp.name
+    try:
+        client = InferenceClient(token=HF_TOKEN)
+        result = client.automatic_speech_recognition(
+            tmp_path, model=STT_MODEL
+        )
+        return result.text if hasattr(result, "text") else str(result)
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
 
 
 # ── RAG Pipeline ────────────────────────────────────────────────────
@@ -504,8 +519,10 @@ else:
         )
         st.session_state.scroll_to = None
 
-    # ── Voice Input (Speech-to-Text) ────────────────────────────────
-    audio_data = st.audio_input("🎤 Ask by voice")
+    # ── Voice + Text Input Row ───────────────────────────────────────
+    mic_col, _ = st.columns([1, 5])
+    with mic_col:
+        audio_data = st.audio_input("Voice", label_visibility="collapsed")
     if audio_data:
         audio_hash = hashlib.md5(audio_data.getvalue()).hexdigest()
         if st.session_state.last_audio_hash != audio_hash:
