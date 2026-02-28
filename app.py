@@ -11,6 +11,7 @@ Usage (local):
     streamlit run app.py
 """
 
+import hashlib
 import io
 import tempfile
 from pathlib import Path
@@ -33,7 +34,10 @@ TOP_K = 4
 
 LLM_MODEL = "Qwen/Qwen2.5-7B-Instruct"
 STT_MODEL = "openai/whisper-large-v3-turbo"
-HF_TOKEN = st.secrets["HF_TOKEN"]
+try:
+    HF_TOKEN = st.secrets["HF_TOKEN"]
+except (KeyError, FileNotFoundError):
+    HF_TOKEN = None
 
 # ── Page Config ─────────────────────────────────────────────────────
 st.set_page_config(
@@ -108,47 +112,12 @@ st.markdown("""
         padding: 0.8rem 0 !important;
     }
 
-    /* ── Input bar (pinned form) ─────────────────────────────────── */
-    [data-testid="stForm"] {
-        position: fixed !important;
-        bottom: 0 !important;
-        left: 50% !important;
-        transform: translateX(-50%) !important;
-        width: 100% !important;
-        max-width: 50rem !important;
-        padding: 0.5rem 1rem 0.7rem !important;
-        background: rgba(13, 13, 13, 0.95) !important;
-        backdrop-filter: blur(20px) !important;
-        border: none !important;
-        border-top: 1px solid rgba(255, 255, 255, 0.08) !important;
-        border-radius: 0 !important;
-        z-index: 100 !important;
-    }
-    [data-testid="stForm"] [data-testid="stHorizontalBlock"] {
-        align-items: center !important;
-        gap: 0.35rem !important;
-    }
-    [data-testid="stForm"] .stTextInput > div > div {
-        background: rgba(255, 255, 255, 0.05) !important;
-        border: 1px solid rgba(255, 255, 255, 0.1) !important;
-        border-radius: 10px !important;
-    }
-    [data-testid="stForm"] .stTextInput input {
-        color: #e0e0e0 !important;
-    }
-    [data-testid="stForm"] [data-testid="stFormSubmitButton"] button {
-        min-height: 2.4rem !important;
-        font-size: 1.1rem !important;
-        padding: 0.3rem 0.7rem !important;
-    }
-    [data-testid="stForm"] [data-testid="stAudioInput"] {
+    /* ── Compact mic widget ─────────────────────────────────────── */
+    [data-testid="stAudioInput"] {
         min-height: 0 !important;
     }
-    [data-testid="stForm"] [data-testid="stAudioInput"] > div {
+    [data-testid="stAudioInput"] > div {
         padding: 0 !important;
-    }
-    .main .block-container {
-        padding-bottom: 5rem !important;
     }
 
     /* ── Buttons ─────────────────────────────────────────────────── */
@@ -402,6 +371,7 @@ for key, default in {
     "page_count": 0,
     "chunk_count": 0,
     "scroll_to": None,
+    "last_audio_hash": None,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -414,6 +384,15 @@ st.markdown("""
     <p>Upload a PDF and start a conversation with your document</p>
 </div>
 """, unsafe_allow_html=True)
+
+# ── Guard: HF_TOKEN ─────────────────────────────────────────────────
+if not HF_TOKEN:
+    st.error(
+        "**HuggingFace token not found.** "
+        "Add `HF_TOKEN` in *Settings → Secrets* on Streamlit Cloud, "
+        "or in `.streamlit/secrets.toml` locally."
+    )
+    st.stop()
 
 
 # ── Sidebar — Query Log ────────────────────────────────────────────
@@ -544,38 +523,63 @@ else:
         )
         st.session_state.scroll_to = None
 
-    # ── Input Bar (Text + Mic + Send) ────────────────────────────────
-    with st.form("chat_form", clear_on_submit=True, border=False):
-        input_col, mic_col, send_col = st.columns([8, 1, 1])
-        with input_col:
-            text_input = st.text_input(
-                "Message",
-                placeholder="Ask something about your document...",
-                label_visibility="collapsed",
-            )
-        with mic_col:
-            audio_data = st.audio_input("🎤", label_visibility="collapsed")
-        with send_col:
-            submitted = st.form_submit_button("➤", type="primary")
+    # ── Voice Input (auto-submit on record) ──────────────────────
+    _, mic_c = st.columns([11, 1])
+    with mic_c:
+        audio_data = st.audio_input("🎤", label_visibility="collapsed")
 
-    if submitted:
-        prompt = None
-        if text_input and text_input.strip():
-            prompt = text_input.strip()
-        elif audio_data:
+    if audio_data:
+        audio_hash = hashlib.md5(audio_data.getvalue()).hexdigest()
+        if st.session_state.last_audio_hash != audio_hash:
+            st.session_state.last_audio_hash = audio_hash
             with st.spinner("Transcribing your voice..."):
                 try:
-                    prompt = transcribe_audio(audio_data.getvalue())
+                    voice_prompt = transcribe_audio(audio_data.getvalue())
                 except Exception as e:
                     st.error(f"Transcription failed: {e}")
+                    voice_prompt = None
+            if voice_prompt and voice_prompt.strip():
+                prompt = voice_prompt.strip()
+                st.session_state.messages.append(
+                    {"role": "user", "content": prompt}
+                )
+                with st.spinner("Thinking..."):
+                    try:
+                        answer, sources = retrieve_and_generate(
+                            prompt, st.session_state.vector_db, LLM_MODEL
+                        )
+                        st.session_state.messages.append(
+                            {"role": "assistant", "content": answer, "sources": sources}
+                        )
+                    except Exception as e:
+                        err = str(e)
+                        if "401" in err or "Unauthorized" in err or "Invalid" in err:
+                            error_msg = "Authentication error. Please try again later."
+                        elif "loading" in err.lower() or "unavailable" in err.lower():
+                            error_msg = "Model is waking up (~30s). Try again in a moment."
+                        else:
+                            error_msg = f"Something went wrong: {err}\n\nPlease try again."
+                        st.session_state.messages.append(
+                            {"role": "assistant", "content": error_msg}
+                        )
+                st.rerun()
 
-        if prompt:
-            st.session_state.messages.append({"role": "user", "content": prompt})
+    # ── Text Input (pinned chat bar) ───────────────────────────────
+    if prompt := st.chat_input("Ask something about your document..."):
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user", avatar="🧑‍💻"):
+            st.markdown(prompt)
+
+        with st.chat_message("assistant", avatar="🖋️"):
             with st.spinner("Thinking..."):
                 try:
                     answer, sources = retrieve_and_generate(
                         prompt, st.session_state.vector_db, LLM_MODEL
                     )
+                    st.markdown(answer)
+                    if sources:
+                        with st.expander("Sources"):
+                            st.markdown(" · ".join(sources))
                     st.session_state.messages.append(
                         {"role": "assistant", "content": answer, "sources": sources}
                     )
@@ -587,10 +591,10 @@ else:
                         error_msg = "Model is waking up (~30s). Try again in a moment."
                     else:
                         error_msg = f"Something went wrong: {err}\n\nPlease try again."
+                    st.error(error_msg)
                     st.session_state.messages.append(
                         {"role": "assistant", "content": error_msg}
                     )
-            st.rerun()
 
     # Option to upload a new PDF
     with st.expander("Upload a different PDF"):
