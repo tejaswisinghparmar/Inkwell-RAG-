@@ -11,10 +11,13 @@ Usage (local):
     streamlit run app.py
 """
 
+import hashlib
+import io
 import tempfile
 from pathlib import Path
 
 import streamlit as st
+from gtts import gTTS
 from huggingface_hub import InferenceClient
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.embeddings.fastembed import FastEmbedEmbeddings
@@ -30,6 +33,7 @@ CHUNK_OVERLAP_SMALL = 100
 TOP_K = 4
 
 LLM_MODEL = "Qwen/Qwen2.5-7B-Instruct"
+STT_MODEL = "openai/whisper-large-v3-turbo"
 HF_TOKEN = st.secrets["HF_TOKEN"]
 
 # ── Page Config ─────────────────────────────────────────────────────
@@ -293,6 +297,26 @@ def process_pdf(uploaded_file, embedding_model):
     return vector_store, len(docs), len(chunks)
 
 
+# ── Text-to-Speech ──────────────────────────────────────────────────
+def text_to_speech(text: str):
+    """Convert text to an in-memory MP3 audio buffer using gTTS."""
+    tts = gTTS(text=text, lang="en")
+    buf = io.BytesIO()
+    tts.write_to_fp(buf)
+    buf.seek(0)
+    return buf
+
+
+# ── Speech-to-Text ──────────────────────────────────────────────────
+def transcribe_audio(audio_bytes: bytes) -> str:
+    """Transcribe audio bytes using HuggingFace Whisper model."""
+    client = InferenceClient(token=HF_TOKEN)
+    result = client.automatic_speech_recognition(
+        audio_bytes, model=STT_MODEL
+    )
+    return result.text if hasattr(result, "text") else str(result)
+
+
 # ── RAG Pipeline ────────────────────────────────────────────────────
 def retrieve_and_generate(query: str, vector_db, model_id: str):
     """Retrieve -> Prompt -> Generate using HuggingFace Inference API."""
@@ -337,6 +361,7 @@ for key, default in {
     "page_count": 0,
     "chunk_count": 0,
     "scroll_to": None,
+    "last_audio_hash": None,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -456,6 +481,14 @@ else:
             if msg.get("sources"):
                 with st.expander("Sources"):
                     st.markdown(" · ".join(msg["sources"]))
+            # TTS: listen button for assistant responses
+            if msg["role"] == "assistant":
+                if st.button("🔊 Listen", key=f"tts_{i}", help="Read aloud"):
+                    try:
+                        audio_buf = text_to_speech(msg["content"])
+                        st.audio(audio_buf, format="audio/mp3")
+                    except Exception:
+                        st.caption("Audio generation failed.")
 
     # Scroll to a specific message if requested from sidebar
     if st.session_state.scroll_to is not None:
@@ -470,6 +503,46 @@ else:
             unsafe_allow_html=True,
         )
         st.session_state.scroll_to = None
+
+    # ── Voice Input (Speech-to-Text) ────────────────────────────────
+    audio_data = st.audio_input("🎤 Ask by voice")
+    if audio_data:
+        audio_hash = hashlib.md5(audio_data.getvalue()).hexdigest()
+        if st.session_state.last_audio_hash != audio_hash:
+            st.session_state.last_audio_hash = audio_hash
+            with st.spinner("Transcribing your voice..."):
+                try:
+                    transcribed = transcribe_audio(audio_data.getvalue())
+                except Exception as e:
+                    st.error(f"Transcription failed: {e}")
+                    transcribed = None
+            if transcribed and transcribed.strip():
+                voice_prompt = transcribed.strip()
+                st.session_state.messages.append(
+                    {"role": "user", "content": voice_prompt}
+                )
+                with st.spinner("Thinking..."):
+                    try:
+                        answer, sources = retrieve_and_generate(
+                            voice_prompt,
+                            st.session_state.vector_db,
+                            LLM_MODEL,
+                        )
+                        st.session_state.messages.append(
+                            {"role": "assistant", "content": answer, "sources": sources}
+                        )
+                    except Exception as e:
+                        err = str(e)
+                        if "401" in err or "Unauthorized" in err or "Invalid" in err:
+                            error_msg = "Authentication error. Please try again later."
+                        elif "loading" in err.lower() or "unavailable" in err.lower():
+                            error_msg = "Model is waking up (~30s). Try again in a moment."
+                        else:
+                            error_msg = f"Something went wrong: {err}\n\nPlease try again."
+                        st.session_state.messages.append(
+                            {"role": "assistant", "content": error_msg}
+                        )
+                st.rerun()
 
     # Chat input
     if prompt := st.chat_input("Ask something about your document..."):
