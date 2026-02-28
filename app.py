@@ -25,6 +25,8 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 CHUNK_SIZE = 1500
 CHUNK_OVERLAP = 300
+CHUNK_SIZE_SMALL = 500
+CHUNK_OVERLAP_SMALL = 100
 TOP_K = 4
 
 LLM_MODEL = "Qwen/Qwen2.5-7B-Instruct"
@@ -261,10 +263,24 @@ def process_pdf(uploaded_file, embedding_model):
 
     progress.progress(20, text=f"Loaded {len(docs)} pages. Chunking...")
 
+    # Measure total text to pick chunking strategy
+    total_text = sum(len(d.page_content) for d in docs)
+
+    if total_text < 2000:
+        # Small document — use smaller chunks so we get meaningful splits
+        chunk_size, chunk_overlap = CHUNK_SIZE_SMALL, CHUNK_OVERLAP_SMALL
+    else:
+        chunk_size, chunk_overlap = CHUNK_SIZE, CHUNK_OVERLAP
+
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP
+        chunk_size=chunk_size, chunk_overlap=chunk_overlap
     )
     chunks = splitter.split_documents(docs)
+
+    if not chunks:
+        # If splitting produced nothing, use the raw pages as chunks
+        chunks = docs
+
     progress.progress(40, text=f"Created {len(chunks)} chunks. Embedding...")
 
     vector_store = QdrantVectorStore.from_documents(
@@ -280,7 +296,9 @@ def process_pdf(uploaded_file, embedding_model):
 # ── RAG Pipeline ────────────────────────────────────────────────────
 def retrieve_and_generate(query: str, vector_db, model_id: str):
     """Retrieve -> Prompt -> Generate using HuggingFace Inference API."""
-    results = vector_db.similarity_search(query=query, k=TOP_K)
+    # Use fewer results if the collection is small
+    k = min(TOP_K, max(1, vector_db._client.count("uploaded_pdf").count))
+    results = vector_db.similarity_search(query=query, k=k)
 
     context_parts, sources = [], []
     for r in results:
