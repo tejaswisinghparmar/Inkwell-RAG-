@@ -32,7 +32,7 @@ CHUNK_SIZE_SMALL = 500
 CHUNK_OVERLAP_SMALL = 100
 TOP_K = 4
 
-LLM_MODEL = "Qwen/Qwen2.5-7B-Instruct"
+LLM_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 STT_MODEL = "openai/whisper-large-v3-turbo"
 try:
     HF_TOKEN = st.secrets["HF_TOKEN"]
@@ -350,9 +350,9 @@ def retrieve_and_generate(query: str, vector_db, model_id: str):
     user_msg = f"Context:\n{context}\n\nUser Query: {query}"
 
     client = InferenceClient(
-        token=HF_TOKEN,
-        provider="together"
-    )
+    token=HF_TOKEN,
+    provider="nscale"
+)
 
     response = client.chat_completion(
         model=model_id,
