@@ -349,7 +349,11 @@ def retrieve_and_generate(query: str, vector_db, model_id: str):
     )
     user_msg = f"Context:\n{context}\n\nUser Query: {query}"
 
-    client = InferenceClient(token=HF_TOKEN)
+    client = InferenceClient(
+        token=HF_TOKEN,
+        provider="together"
+    )
+
     response = client.chat_completion(
         model=model_id,
         messages=[
