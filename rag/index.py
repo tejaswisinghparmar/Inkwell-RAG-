@@ -1,6 +1,8 @@
 """
 ingest.py — PDF Ingestion & Indexing Pipeline
 
+
+
 Reads a PDF document, splits it into overlapping chunks, generates
 vector embeddings with FastEmbed (BAAI/bge-small-en-v1.5), and stores
 them in a Qdrant collection for later retrieval.
